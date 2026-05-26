@@ -108,9 +108,21 @@ def notify_post():
         if not parsed:
             send_telegram_message_sync(f"📱 Chime Notification:\n{text}")
             return jsonify({"status": "forwarded_raw"})
+
+        tag = data.get("tag", DEFAULT_TAG)
+
+        if parsed.get("type") == "spending":
+            set_balance(tag, parsed["new_balance"])
+            msg = format_spending_message(parsed)
+            try:
+                send_telegram_message_sync(msg)
+            except Exception as e:
+                logger.error("Failed to send spending: %s", e)
+                return jsonify({"error": str(e)}), 500
+            return jsonify({"status": "ok", "type": "spending", "amount": parsed["amount"], "merchant": parsed["merchant"]})
+
         amount = parsed["amount"]
         sender = parsed["sender"]
-        tag = data.get("tag", DEFAULT_TAG)
     else:
         # Direct amount/sender input
         amount = float(data.get("amount", 0))
@@ -129,7 +141,7 @@ def notify_post():
         logger.error("Failed to send: %s", e)
         return jsonify({"error": str(e)}), 500
 
-    return jsonify({"status": "ok", "amount": amount, "sender": sender})
+    return jsonify({"status": "ok", "type": "received", "amount": amount, "sender": sender})
 
 
 @app.route("/setbalance", methods=["POST"])
