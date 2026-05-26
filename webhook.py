@@ -9,8 +9,8 @@ import os
 from urllib.parse import unquote
 
 from flask import Flask, request, jsonify
-from database import add_payment, init_db
-from bot import format_payment_message, parse_chime_sms
+from database import add_payment, set_balance, init_db
+from bot import format_payment_message, format_spending_message, parse_chime_sms
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DEFAULT_TAG
 
 logging.basicConfig(
@@ -57,7 +57,7 @@ def notify_get():
 
     parsed = parse_chime_sms(text)
     if not parsed:
-        # Not a recognized Chime payment, send raw text
+        # Not a recognized Chime notification, send raw text
         try:
             send_telegram_message_sync(f"📱 Chime Notification:\n{text}")
         except Exception as e:
@@ -65,6 +65,20 @@ def notify_get():
         return jsonify({"status": "forwarded_raw", "text": text})
 
     tag = DEFAULT_TAG
+
+    if parsed.get("type") == "spending":
+        # Spending notification - update balance and send formatted message
+        set_balance(tag, parsed["new_balance"])
+        msg = format_spending_message(parsed)
+        try:
+            send_telegram_message_sync(msg)
+            logger.info("Spending sent: $%.2f at %s", parsed["amount"], parsed["merchant"])
+        except Exception as e:
+            logger.error("Failed to send spending notification: %s", e)
+            return jsonify({"error": str(e)}), 500
+        return jsonify({"status": "ok", "type": "spending", "amount": parsed["amount"], "merchant": parsed["merchant"]})
+
+    # Payment received
     payment = add_payment(tag, parsed["amount"], parsed["sender"])
     msg = format_payment_message(payment)
 
@@ -75,7 +89,7 @@ def notify_get():
         logger.error("Failed to send formatted payment: %s", e)
         return jsonify({"error": str(e)}), 500
 
-    return jsonify({"status": "ok", "amount": parsed["amount"], "sender": parsed["sender"]})
+    return jsonify({"status": "ok", "type": "received", "amount": parsed["amount"], "sender": parsed["sender"]})
 
 
 @app.route("/notify", methods=["POST"])

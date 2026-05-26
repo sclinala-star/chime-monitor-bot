@@ -176,9 +176,27 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # Patterns for parsing Chime notifications
-# Format: "Oh yeah! Anthony K. sent you $20.00. 🤜"
+# Payment received formats:
+#   "Oh yeah! Anthony K. sent you $20.00. 🤜"
+#   "YAAAS! Daniel J. sent you $75.00. 🎉"
+#   "Woot! Jannette P. sent you $25.00. 💥"
+#   "Hooray! Skip S. sent you $40.00. 😁"
+# Spending format:
+#   "You spent $180.00. Your new Chime account balance is $13.71 after your purchase at Crypto.Com."
 CHIME_PATTERN = re.compile(
     r"([A-Z][a-z]+(?:\s+[A-Z]\.?)?)\s+sent\s+you\s+\$\s*([\d,]+\.?\d*)",
+    re.IGNORECASE,
+)
+CHIME_SPENT_PATTERN = re.compile(
+    r"You\s+spent\s+\$\s*([\d,]+\.?\d*)",
+    re.IGNORECASE,
+)
+CHIME_BALANCE_PATTERN = re.compile(
+    r"balance\s+is\s+\$\s*([\d,]+\.?\d*)",
+    re.IGNORECASE,
+)
+CHIME_PURCHASE_PATTERN = re.compile(
+    r"purchase\s+at\s+(.+?)\.?\s*$",
     re.IGNORECASE,
 )
 # Fallback: any "$amount" pattern
@@ -189,24 +207,53 @@ SMS_SENDER_PATTERN = re.compile(
 )
 
 
+def format_spending_message(spending: dict) -> str:
+    amount = spending["amount"]
+    merchant = spending["merchant"]
+    new_balance = spending["new_balance"]
+
+    msg = (
+        f"💸 <b>Chime Out</b>\n"
+        f"\n"
+        f"💵 Amount Spent: ${amount:,.2f}\n"
+        f"🏪 Purchase at: {merchant}\n"
+        f"💳 New Balance: ${new_balance:,.2f}"
+    )
+    return msg
+
+
 def parse_chime_sms(text: str) -> dict | None:
     """Parse a Chime notification text to extract payment info.
     
-    Handles formats like:
+    Handles all known Chime notification formats:
     - "Oh yeah! Anthony K. sent you $20.00. 🤜"
-    - "You received $X from Name"
+    - "YAAAS! Muhamadou T. sent you $3.71. 🎉"
+    - "Woot! Jannette P. sent you $25.00. 💥"
+    - "Hooray! Skip S. sent you $40.00. 😁"
+    - "You spent $180.00 ... balance is $13.71 ... purchase at Crypto.Com."
     """
+    # Check for spending notification
+    spent_match = CHIME_SPENT_PATTERN.search(text)
+    if spent_match:
+        amount = float(spent_match.group(1).replace(",", ""))
+        balance_match = CHIME_BALANCE_PATTERN.search(text)
+        new_balance = float(balance_match.group(1).replace(",", "")) if balance_match else 0.0
+        purchase_match = CHIME_PURCHASE_PATTERN.search(text)
+        merchant = purchase_match.group(1).strip() if purchase_match else "Unknown"
+        return {"type": "spending", "amount": amount, "new_balance": new_balance, "merchant": merchant}
+
     # Try primary Chime format: "Name sent you $amount"
     chime_match = CHIME_PATTERN.search(text)
     if chime_match:
         sender = chime_match.group(1).strip()
         amount = float(chime_match.group(2).replace(",", ""))
-        return {"amount": amount, "sender": sender}
+        return {"type": "received", "amount": amount, "sender": sender}
 
     # Fallback: look for keywords + amount
     lower = text.lower()
     is_chime = any(kw in lower for kw in [
-        "oh yeah", "sent you", "chime", "payment", "received", "deposit", "direct pay",
+        "oh yeah", "yaaas", "woot", "hooray", "sent you",
+        "chime", "payment", "received", "deposit", "direct pay",
     ])
     has_amount = SMS_AMOUNT_PATTERN.search(text)
     if not is_chime or not has_amount:
@@ -216,7 +263,7 @@ def parse_chime_sms(text: str) -> dict | None:
     sender_match = SMS_SENDER_PATTERN.search(text)
     sender = sender_match.group(1).strip() if sender_match else "Unknown"
 
-    return {"amount": amount, "sender": sender}
+    return {"type": "received", "amount": amount, "sender": sender}
 
 
 async def sms_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
