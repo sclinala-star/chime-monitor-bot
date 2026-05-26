@@ -175,7 +175,13 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
-# Patterns for parsing Chime SMS/notifications
+# Patterns for parsing Chime notifications
+# Format: "Oh yeah! Anthony K. sent you $20.00. 🤜"
+CHIME_PATTERN = re.compile(
+    r"([A-Z][a-z]+(?:\s+[A-Z]\.?)?)\s+sent\s+you\s+\$\s*([\d,]+\.?\d*)",
+    re.IGNORECASE,
+)
+# Fallback: any "$amount" pattern
 SMS_AMOUNT_PATTERN = re.compile(r"\$\s*([\d,]+\.?\d*)")
 SMS_SENDER_PATTERN = re.compile(
     r"(?:from|sent by|paid by|received from)\s+([A-Z][a-z]+(?:\s+[A-Z]\.?)?)",
@@ -184,10 +190,24 @@ SMS_SENDER_PATTERN = re.compile(
 
 
 def parse_chime_sms(text: str) -> dict | None:
-    """Parse a Chime SMS/notification text to extract payment info."""
+    """Parse a Chime notification text to extract payment info.
+    
+    Handles formats like:
+    - "Oh yeah! Anthony K. sent you $20.00. 🤜"
+    - "You received $X from Name"
+    """
+    # Try primary Chime format: "Name sent you $amount"
+    chime_match = CHIME_PATTERN.search(text)
+    if chime_match:
+        sender = chime_match.group(1).strip()
+        amount = float(chime_match.group(2).replace(",", ""))
+        return {"amount": amount, "sender": sender}
+
+    # Fallback: look for keywords + amount
     lower = text.lower()
-    # Check if it looks like a Chime payment notification
-    is_chime = any(kw in lower for kw in ["chime", "payment", "received", "deposit", "direct pay"])
+    is_chime = any(kw in lower for kw in [
+        "oh yeah", "sent you", "chime", "payment", "received", "deposit", "direct pay",
+    ])
     has_amount = SMS_AMOUNT_PATTERN.search(text)
     if not is_chime or not has_amount:
         return None

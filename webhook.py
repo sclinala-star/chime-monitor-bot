@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-Webhook server for receiving Chime payment notifications from external services.
-Can be used with Zapier, IFTTT, or custom integrations.
-
-Run this alongside the bot for webhook-based payment detection.
+Webhook server that receives Chime notifications from MacroDroid,
+parses them, and sends formatted payment messages to Telegram.
 """
 import asyncio
-import json
 import logging
-from http.server import HTTPServer, BaseHTTPRequestHandler
+import os
+from urllib.parse import unquote
+
+from flask import Flask, request, jsonify
 from database import add_payment, init_db
+from bot import format_payment_message, parse_chime_sms
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DEFAULT_TAG
 
 logging.basicConfig(
@@ -18,66 +19,127 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+app = Flask(__name__)
+init_db()
 
-async def send_telegram_message(text: str):
-    """Send a message to the configured Telegram chat."""
+
+def send_telegram_message_sync(text: str):
+    """Send a formatted message to the Telegram group."""
     import telegram
-    bot = telegram.Bot(token=TELEGRAM_BOT_TOKEN)
-    await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text, parse_mode="HTML")
+
+    async def _send():
+        bot = telegram.Bot(token=TELEGRAM_BOT_TOKEN)
+        await bot.send_message(
+            chat_id=TELEGRAM_CHAT_ID,
+            text=text,
+            parse_mode="HTML",
+        )
+
+    asyncio.run(_send())
 
 
-class WebhookHandler(BaseHTTPRequestHandler):
-    def do_POST(self):
-        content_length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(content_length)
+@app.route("/", methods=["GET"])
+def health():
+    return jsonify({"status": "Chime Monitor Active"})
 
+
+@app.route("/notify", methods=["GET"])
+def notify_get():
+    """Handle MacroDroid HTTP GET with notification text as query param.
+    
+    URL format: /notify?text=Oh+yeah!+Anthony+K.+sent+you+$20.00.+🤜
+    """
+    text = request.args.get("text", "")
+    if not text:
+        return jsonify({"error": "No text provided"}), 400
+
+    logger.info("Received notification: %s", text)
+
+    parsed = parse_chime_sms(text)
+    if not parsed:
+        # Not a recognized Chime payment, send raw text
         try:
-            data = json.loads(body)
-            amount = float(data.get("amount", 0))
-            sender = data.get("sender", "Unknown")
-            tag = data.get("tag", DEFAULT_TAG)
-
-            if amount <= 0:
-                self.send_response(400)
-                self.end_headers()
-                self.wfile.write(b'{"error": "Invalid amount"}')
-                return
-
-            payment = add_payment(tag, amount, sender)
-
-            from bot import format_payment_message
-            msg = format_payment_message(payment)
-
-            asyncio.run(send_telegram_message(msg))
-
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(json.dumps({"status": "ok", "payment": payment}).encode())
-            logger.info("Webhook payment: $%.2f from %s", amount, sender)
-
+            send_telegram_message_sync(f"📱 Chime Notification:\n{text}")
         except Exception as e:
-            logger.error("Webhook error: %s", e)
-            self.send_response(500)
-            self.end_headers()
-            self.wfile.write(json.dumps({"error": str(e)}).encode())
+            logger.error("Failed to send raw notification: %s", e)
+        return jsonify({"status": "forwarded_raw", "text": text})
 
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b'{"status": "Chime Monitor Webhook Active"}')
+    tag = DEFAULT_TAG
+    payment = add_payment(tag, parsed["amount"], parsed["sender"])
+    msg = format_payment_message(payment)
 
-    def log_message(self, format, *args):
-        logger.info(format, *args)
+    try:
+        send_telegram_message_sync(msg)
+        logger.info("Formatted payment sent: $%.2f from %s", parsed["amount"], parsed["sender"])
+    except Exception as e:
+        logger.error("Failed to send formatted payment: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+    return jsonify({"status": "ok", "amount": parsed["amount"], "sender": parsed["sender"]})
 
 
-def main():
-    init_db()
-    port = 8080
-    server = HTTPServer(("0.0.0.0", port), WebhookHandler)
-    logger.info("Webhook server running on port %d", port)
-    logger.info("POST /webhook with JSON: {\"amount\": 7.00, \"sender\": \"Adam K.\", \"tag\": \"Evelyn\"}")
-    server.serve_forever()
+@app.route("/notify", methods=["POST"])
+def notify_post():
+    """Handle POST requests with JSON body.
+    
+    JSON format: {"text": "Oh yeah! Anthony K. sent you $20.00. 🤜"}
+    Or: {"amount": 7.00, "sender": "Adam K.", "tag": "Evelyn"}
+    """
+    data = request.get_json(silent=True) or {}
+
+    # If raw text is provided, parse it
+    if "text" in data:
+        text = data["text"]
+        parsed = parse_chime_sms(text)
+        if not parsed:
+            send_telegram_message_sync(f"📱 Chime Notification:\n{text}")
+            return jsonify({"status": "forwarded_raw"})
+        amount = parsed["amount"]
+        sender = parsed["sender"]
+        tag = data.get("tag", DEFAULT_TAG)
+    else:
+        # Direct amount/sender input
+        amount = float(data.get("amount", 0))
+        sender = data.get("sender", "Unknown")
+        tag = data.get("tag", DEFAULT_TAG)
+
+    if amount <= 0:
+        return jsonify({"error": "Invalid amount"}), 400
+
+    payment = add_payment(tag, amount, sender)
+    msg = format_payment_message(payment)
+
+    try:
+        send_telegram_message_sync(msg)
+    except Exception as e:
+        logger.error("Failed to send: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+    return jsonify({"status": "ok", "amount": amount, "sender": sender})
+
+
+@app.route("/setbalance", methods=["POST"])
+def set_balance_endpoint():
+    """Set account balance: {"balance": 2877.72, "tag": "Evelyn"}"""
+    from database import set_balance
+    data = request.get_json(silent=True) or {}
+    balance = float(data.get("balance", 0))
+    tag = data.get("tag", DEFAULT_TAG)
+    set_balance(tag, balance)
+    return jsonify({"status": "ok", "tag": tag, "balance": balance})
+
+
+@app.route("/settotal", methods=["POST"])
+def set_total_endpoint():
+    """Set running total: {"total": 2662.72, "tag": "Evelyn"}"""
+    from database import set_total
+    data = request.get_json(silent=True) or {}
+    total = float(data.get("total", 0))
+    tag = data.get("tag", DEFAULT_TAG)
+    set_total(tag, total)
+    return jsonify({"status": "ok", "tag": tag, "total": total})
 
 
 if __name__ == "__main__":
-    main()
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port, debug=False)
