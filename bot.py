@@ -34,10 +34,7 @@ def format_payment_message(payment: dict) -> str:
         f"💵 New Payment: ${amount:,.2f}\n"
         f"🚢 Sent by: {sender}\n"
         f"\n"
-        f"💰 Previous Total: ${prev_total:,.2f}\n"
-        f"🏦 New Total: ${prev_total:,.2f} + ${amount:,.2f} = ${new_total:,.2f}\n"
-        f"\n"
-        f"💳 Account Balance: ${prev_balance:,.2f} + ${amount:,.2f} = ${new_balance:,.2f}"
+        f"💳 Account Balance: ${new_balance:,.2f}"
     )
     return msg
 
