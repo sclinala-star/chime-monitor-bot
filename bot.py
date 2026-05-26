@@ -1,9 +1,12 @@
 import logging
+import re
 from telegram import Update
 from telegram.ext import (
     Application,
     CommandHandler,
+    MessageHandler,
     ContextTypes,
+    filters,
 )
 from database import init_db, add_payment, get_account, set_balance, set_total, get_recent_payments
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DEFAULT_TAG
@@ -172,6 +175,55 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
+# Patterns for parsing Chime SMS/notifications
+SMS_AMOUNT_PATTERN = re.compile(r"\$\s*([\d,]+\.?\d*)")
+SMS_SENDER_PATTERN = re.compile(
+    r"(?:from|sent by|paid by|received from)\s+([A-Z][a-z]+(?:\s+[A-Z]\.?)?)",
+    re.IGNORECASE,
+)
+
+
+def parse_chime_sms(text: str) -> dict | None:
+    """Parse a Chime SMS/notification text to extract payment info."""
+    lower = text.lower()
+    # Check if it looks like a Chime payment notification
+    is_chime = any(kw in lower for kw in ["chime", "payment", "received", "deposit", "direct pay"])
+    has_amount = SMS_AMOUNT_PATTERN.search(text)
+    if not is_chime or not has_amount:
+        return None
+
+    amount = float(has_amount.group(1).replace(",", ""))
+    sender_match = SMS_SENDER_PATTERN.search(text)
+    sender = sender_match.group(1).strip() if sender_match else "Unknown"
+
+    return {"amount": amount, "sender": sender}
+
+
+async def sms_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle forwarded SMS or plain text messages containing Chime payment info."""
+    text = update.message.text or ""
+    if not text:
+        return
+
+    parsed = parse_chime_sms(text)
+    if not parsed:
+        return
+
+    tag = DEFAULT_TAG
+    payment = add_payment(tag, parsed["amount"], parsed["sender"])
+    msg = format_payment_message(payment)
+    await update.message.reply_text(msg, parse_mode="HTML")
+
+    # Also send to the configured group
+    chat_id = str(update.effective_chat.id)
+    if TELEGRAM_CHAT_ID and chat_id != TELEGRAM_CHAT_ID:
+        await context.bot.send_message(
+            chat_id=TELEGRAM_CHAT_ID,
+            text=msg,
+            parse_mode="HTML",
+        )
+
+
 def create_app() -> Application:
     init_db()
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
@@ -182,4 +234,6 @@ def create_app() -> Application:
     app.add_handler(CommandHandler("setbalance", set_balance_command))
     app.add_handler(CommandHandler("settotal", set_total_command))
     app.add_handler(CommandHandler("history", history_command))
+    # Handle forwarded SMS / plain text messages with Chime payment info
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, sms_handler))
     return app
