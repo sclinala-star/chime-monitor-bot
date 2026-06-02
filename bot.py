@@ -399,6 +399,62 @@ async def sms_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+async def st_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start tracking: /st <account name>"""
+    if not context.args:
+        await update.message.reply_text("Usage: /st Georgiana Keel")
+        return
+    tag_text = " ".join(context.args)
+    tag = _detect_tag_from_text(tag_text)
+    start_tracking(tag)
+    await update.message.reply_text(
+        f"▶️ <b>Tracking Started</b>\n\n"
+        f"👤 Account: {tag}\n"
+        f"📊 Fund out tracking চালু হয়েছে।\n\n"
+        f"Stop করতে: /stop {tag.split()[0]}",
+        parse_mode="HTML",
+    )
+
+
+async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Stop tracking: /stop <account name>"""
+    if not context.args:
+        await update.message.reply_text("Usage: /stop Georgiana Keel")
+        return
+    tag_text = " ".join(context.args)
+    tag = _detect_tag_from_text(tag_text)
+    result = stop_tracking(tag)
+    if not result.get("active"):
+        await update.message.reply_text(
+            f"⚠️ {tag} এর tracking চালু ছিল না।",
+            parse_mode="HTML",
+        )
+        return
+    await update.message.reply_text(
+        f"⏹️ <b>Tracking Stopped</b>\n\n"
+        f"👤 Account: {tag}\n"
+        f"💸 Total Fund Out: ${result['total_out']:,.2f}\n"
+        f"🔢 Transactions: {result['transactions']}\n"
+        f"🕐 Started: {result['started_at'][:16]}",
+        parse_mode="HTML",
+    )
+
+
+async def post_init(application: Application):
+    """Set bot menu commands after startup."""
+    from telegram import BotCommand
+    commands = [
+        BotCommand("balance", "View balance - /balance Georgiana Keel"),
+        BotCommand("setbalance", "Set balance - /setbalance 43 Georgiana Keel"),
+        BotCommand("st", "Start fund out tracking - /st Georgiana"),
+        BotCommand("stop", "Stop tracking & show total - /stop Georgiana"),
+        BotCommand("settotal", "Reset total - /settotal 0 Georgiana Keel"),
+        BotCommand("history", "Recent payments - /history Georgiana Keel"),
+        BotCommand("help", "Show all commands"),
+    ]
+    await application.bot.set_my_commands(commands)
+
+
 def create_app() -> Application:
     init_db()
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
@@ -409,6 +465,9 @@ def create_app() -> Application:
     app.add_handler(CommandHandler("setbalance", set_balance_command))
     app.add_handler(CommandHandler("settotal", set_total_command))
     app.add_handler(CommandHandler("history", history_command))
+    app.add_handler(CommandHandler("st", st_command))
+    app.add_handler(CommandHandler("stop", stop_command))
     # Handle forwarded SMS / plain text messages with Chime payment info
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, sms_handler))
+    app.post_init = post_init
     return app
