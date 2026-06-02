@@ -51,32 +51,32 @@ def health():
 def notify_get():
     """Handle MacroDroid HTTP GET with notification text as query param.
     
-    URL format: /notify?text=Oh+yeah!+Anthony+K.+sent+you+$20.00.+🤜
+    URL format: /notify?tag=Georgiana+Keel&text=Oh+yeah!+Anthony+K.+sent+you+$20.00.+🤜
     """
     text = request.args.get("text", "")
     if not text:
         return jsonify({"error": "No text provided"}), 400
 
-    logger.info("Received notification: %s", text)
+    tag = request.args.get("tag", DEFAULT_TAG)
+    logger.info("Received notification [%s]: %s", tag, text)
 
     parsed = parse_chime_sms(text)
     if not parsed:
         # Not a recognized Chime notification, send raw text
         try:
-            send_telegram_message_sync(f"📱 Chime Notification:\n{text}")
+            send_telegram_message_sync(f"📱 Chime Notification [{tag}]:\n{text}")
         except Exception as e:
             logger.error("Failed to send raw notification: %s", e)
         return jsonify({"status": "forwarded_raw", "text": text})
 
-    tag = DEFAULT_TAG
-
     if parsed.get("type") == "spending":
         # Spending notification - update balance and send formatted message
         set_balance(tag, parsed["new_balance"])
+        parsed["tag"] = tag
         msg = format_spending_message(parsed)
         try:
             send_telegram_message_sync(msg)
-            logger.info("Spending sent: $%.2f at %s", parsed["amount"], parsed["merchant"])
+            logger.info("Spending sent [%s]: $%.2f at %s", tag, parsed["amount"], parsed["merchant"])
         except Exception as e:
             logger.error("Failed to send spending notification: %s", e)
             return jsonify({"error": str(e)}), 500
@@ -88,7 +88,7 @@ def notify_get():
 
     try:
         send_telegram_message_sync(msg)
-        logger.info("Formatted payment sent: $%.2f from %s", parsed["amount"], parsed["sender"])
+        logger.info("Formatted payment sent [%s]: $%.2f from %s", tag, parsed["amount"], parsed["sender"])
     except Exception as e:
         logger.error("Failed to send formatted payment: %s", e)
         return jsonify({"error": str(e)}), 500

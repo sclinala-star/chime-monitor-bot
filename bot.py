@@ -208,8 +208,11 @@ def format_spending_message(spending: dict) -> str:
     amount = spending["amount"]
     merchant = spending["merchant"]
     new_balance = spending["new_balance"]
+    tag = spending.get("tag", "")
 
     lines = ["💸 <b>Chime Out</b>\n"]
+    if tag:
+        lines.append(f"👤 Tag: {tag}")
     if amount > 0:
         lines.append(f"💵 Amount Spent: ${amount:,.2f}")
     lines.append(f"🏪 Purchase at: {merchant}")

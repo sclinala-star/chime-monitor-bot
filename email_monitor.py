@@ -16,6 +16,9 @@ from config import (
     DEFAULT_TAG,
 )
 
+# Known account tags for multi-account detection
+KNOWN_TAGS = ["Georgiana Keel", "Imelda Villanueva"]
+
 logger = logging.getLogger(__name__)
 
 
@@ -51,6 +54,23 @@ def decode_email_subject(msg) -> str:
         else:
             subject += part_bytes
     return subject
+
+
+def detect_tag_from_email(msg) -> str:
+    """Detect which account tag this email belongs to based on email body content.
+    
+    Chime emails typically contain the first name, e.g.:
+    'Georgiana, you just received $30.00 from Bryce K.'
+    """
+    body = decode_email_body(msg)
+    subject = decode_email_subject(msg)
+    full_text = subject + " " + body
+
+    for tag in KNOWN_TAGS:
+        first_name = tag.split()[0]
+        if first_name.lower() in full_text.lower():
+            return tag
+    return DEFAULT_TAG
 
 
 def is_chime_email(msg) -> bool:
@@ -96,25 +116,25 @@ def process_email(msg, send_telegram_fn):
     if not is_chime_email(msg):
         return False
 
+    tag = detect_tag_from_email(msg)
     parsed = parse_chime_email(msg)
     if not parsed:
         # Forward raw subject as notification
         subject = decode_email_subject(msg)
         if subject:
             try:
-                send_telegram_fn(f"📧 Chime Email:\n{subject}")
+                send_telegram_fn(f"📧 Chime Email [{tag}]:\n{subject}")
             except Exception as e:
                 logger.error("Failed to send raw email notification: %s", e)
         return False
 
-    tag = DEFAULT_TAG
-
     if parsed.get("type") == "spending":
         set_balance(tag, parsed["new_balance"])
+        parsed["tag"] = tag
         msg_text = format_spending_message(parsed)
         try:
             send_telegram_fn(msg_text)
-            logger.info("Email spending: $%.2f at %s", parsed["amount"], parsed["merchant"])
+            logger.info("Email spending [%s]: $%.2f at %s", tag, parsed["amount"], parsed["merchant"])
         except Exception as e:
             logger.error("Failed to send spending from email: %s", e)
         return True
@@ -124,7 +144,7 @@ def process_email(msg, send_telegram_fn):
     msg_text = format_payment_message(payment)
     try:
         send_telegram_fn(msg_text)
-        logger.info("Email payment: $%.2f from %s", parsed["amount"], parsed["sender"])
+        logger.info("Email payment [%s]: $%.2f from %s", tag, parsed["amount"], parsed["sender"])
     except Exception as e:
         logger.error("Failed to send payment from email: %s", e)
     return True
