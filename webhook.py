@@ -61,31 +61,56 @@ def send_telegram_message_sync(text: str):
 # from email_monitor import start_email_monitor
 # start_email_monitor(send_telegram_fn=send_telegram_message_sync)
 
-# Start Telegram bot polling in background thread for command handling
-import threading
+# Telegram bot command handling via manual update processing
+import telegram
+from telegram.ext import Application
+from bot import create_app
 
-def _start_bot_polling():
-    """Run the Telegram bot polling in a background thread with its own event loop."""
+_bot_app = None
+
+def _get_bot_app():
+    global _bot_app
+    if _bot_app is None:
+        _bot_app = create_app()
+    return _bot_app
+
+
+def _process_telegram_update(update_data: dict):
+    """Process a Telegram update through the bot handlers."""
     import asyncio
-    try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        from bot import create_app
-        bot_app = create_app()
-        logger.info("Starting Telegram bot polling in background...")
-        bot_app.run_polling(drop_pending_updates=True)
-    except Exception as e:
-        logger.error("Bot polling failed: %s", e)
-        import traceback
-        traceback.print_exc()
 
-_bot_thread = threading.Thread(target=_start_bot_polling, daemon=True)
-_bot_thread.start()
+    async def _handle():
+        bot_app = _get_bot_app()
+        async with bot_app:
+            await bot_app.start()
+            update = telegram.Update.de_json(update_data, bot_app.bot)
+            await bot_app.process_update(update)
+            await bot_app.stop()
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(_handle())
+    finally:
+        loop.close()
 
 
 @app.route("/", methods=["GET"])
 def health():
     return jsonify({"status": "Chime Monitor Active"})
+
+
+@app.route("/telegram_webhook", methods=["POST"])
+def telegram_webhook():
+    """Receive Telegram updates via webhook."""
+    update_data = request.get_json(silent=True)
+    if not update_data:
+        return jsonify({"error": "No data"}), 400
+    try:
+        _process_telegram_update(update_data)
+    except Exception as e:
+        logger.error("Error processing Telegram update: %s", e)
+    return jsonify({"ok": True})
 
 
 @app.route("/notify", methods=["GET"])
