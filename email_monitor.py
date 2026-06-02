@@ -3,9 +3,10 @@ import email
 import re
 import time
 import logging
-import asyncio
+import threading
 from email.header import decode_header
-from database import add_payment
+from database import add_payment, set_balance
+from bot import format_payment_message, format_spending_message, parse_chime_sms
 from config import (
     EMAIL_ADDRESS,
     EMAIL_PASSWORD,
@@ -17,28 +18,9 @@ from config import (
 
 logger = logging.getLogger(__name__)
 
-# Patterns to extract payment info from Chime emails
-AMOUNT_PATTERN = re.compile(r"\$\s*([\d,]+\.?\d*)")
-SENDER_PATTERN = re.compile(
-    r"(?:from|sent by|paid by|received from)\s+([A-Z][a-z]+(?:\s+[A-Z]\.?))",
-    re.IGNORECASE,
-)
 
-
-def parse_chime_email(msg) -> dict | None:
-    subject = ""
-    for part_bytes, charset in decode_header(msg["Subject"] or ""):
-        if isinstance(part_bytes, bytes):
-            subject += part_bytes.decode(charset or "utf-8", errors="replace")
-        else:
-            subject += part_bytes
-
-    # Only process Chime payment emails
-    if "chime" not in subject.lower() and "payment" not in subject.lower():
-        sender_email = msg.get("From", "")
-        if "chime" not in sender_email.lower():
-            return None
-
+def decode_email_body(msg) -> str:
+    """Extract text body from email message."""
     body = ""
     if msg.is_multipart():
         for part in msg.walk():
@@ -50,102 +32,168 @@ def parse_chime_email(msg) -> dict | None:
             elif content_type == "text/html" and not body:
                 payload = part.get_payload(decode=True)
                 if payload:
-                    body += payload.decode("utf-8", errors="replace")
+                    # Strip HTML tags for plain text parsing
+                    html = payload.decode("utf-8", errors="replace")
+                    body += re.sub(r"<[^>]+>", " ", html)
     else:
         payload = msg.get_payload(decode=True)
         if payload:
             body = payload.decode("utf-8", errors="replace")
+    return body.strip()
 
+
+def decode_email_subject(msg) -> str:
+    """Decode email subject."""
+    subject = ""
+    for part_bytes, charset in decode_header(msg["Subject"] or ""):
+        if isinstance(part_bytes, bytes):
+            subject += part_bytes.decode(charset or "utf-8", errors="replace")
+        else:
+            subject += part_bytes
+    return subject
+
+
+def is_chime_email(msg) -> bool:
+    """Check if email is from Chime."""
+    sender = msg.get("From", "").lower()
+    subject = decode_email_subject(msg).lower()
+    return "chime" in sender or "chime" in subject or "no-reply@chime.com" in sender
+
+
+def parse_chime_email(msg) -> dict | None:
+    """Parse a Chime email to extract payment or spending info."""
+    subject = decode_email_subject(msg)
+    body = decode_email_body(msg)
     full_text = subject + " " + body
 
-    amount_match = AMOUNT_PATTERN.search(full_text)
-    if not amount_match:
-        return None
+    # Use the same parser as notifications
+    parsed = parse_chime_sms(full_text)
+    if parsed:
+        return parsed
 
-    amount = float(amount_match.group(1).replace(",", ""))
+    # Try subject alone
+    parsed = parse_chime_sms(subject)
+    if parsed:
+        return parsed
 
-    sender_match = SENDER_PATTERN.search(full_text)
-    sender = sender_match.group(1).strip() if sender_match else "Unknown"
+    # Try body alone
+    parsed = parse_chime_sms(body)
+    if parsed:
+        return parsed
 
-    return {"amount": amount, "sender": sender, "tag": DEFAULT_TAG}
+    return None
 
 
 def connect_imap():
+    """Connect to Outlook IMAP server."""
     mail = imaplib.IMAP4_SSL(EMAIL_IMAP_SERVER, EMAIL_IMAP_PORT)
     mail.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
     return mail
 
 
-def check_new_emails(mail, seen_ids: set) -> list:
-    mail.select("INBOX")
-    _, data = mail.search(None, "UNSEEN")
-    new_payments = []
+def process_email(msg, send_telegram_fn):
+    """Process a single Chime email."""
+    if not is_chime_email(msg):
+        return False
 
-    for email_id in data[0].split():
-        if email_id in seen_ids:
-            continue
-        seen_ids.add(email_id)
+    parsed = parse_chime_email(msg)
+    if not parsed:
+        # Forward raw subject as notification
+        subject = decode_email_subject(msg)
+        if subject:
+            try:
+                send_telegram_fn(f"📧 Chime Email:\n{subject}")
+            except Exception as e:
+                logger.error("Failed to send raw email notification: %s", e)
+        return False
 
-        _, msg_data = mail.fetch(email_id, "(RFC822)")
-        for response_part in msg_data:
-            if isinstance(response_part, tuple):
-                msg = email.message_from_bytes(response_part[1])
-                payment_info = parse_chime_email(msg)
-                if payment_info:
-                    payment = add_payment(
-                        payment_info["tag"],
-                        payment_info["amount"],
-                        payment_info["sender"],
-                    )
-                    new_payments.append(payment)
-                    logger.info(
-                        "New payment detected: $%.2f from %s",
-                        payment_info["amount"],
-                        payment_info["sender"],
-                    )
+    tag = DEFAULT_TAG
 
-    return new_payments
+    if parsed.get("type") == "spending":
+        set_balance(tag, parsed["new_balance"])
+        msg_text = format_spending_message(parsed)
+        try:
+            send_telegram_fn(msg_text)
+            logger.info("Email spending: $%.2f at %s", parsed["amount"], parsed["merchant"])
+        except Exception as e:
+            logger.error("Failed to send spending from email: %s", e)
+        return True
+
+    # Payment received
+    payment = add_payment(tag, parsed["amount"], parsed["sender"])
+    msg_text = format_payment_message(payment)
+    try:
+        send_telegram_fn(msg_text)
+        logger.info("Email payment: $%.2f from %s", parsed["amount"], parsed["sender"])
+    except Exception as e:
+        logger.error("Failed to send payment from email: %s", e)
+    return True
 
 
-async def email_monitor_loop(app):
-    """Background loop that monitors email for Chime payment notifications."""
-    from config import TELEGRAM_CHAT_ID
-    from bot import send_payment_notification
-
+def email_monitor_loop(send_telegram_fn):
+    """Background loop that monitors Outlook for Chime emails."""
     if not EMAIL_ADDRESS or not EMAIL_PASSWORD:
-        logger.warning(
-            "Email credentials not configured. Email monitoring disabled. "
-            "You can still add payments manually via /add command."
-        )
+        logger.warning("Email credentials not configured. Email monitoring disabled.")
         return
 
-    seen_ids = set()
-    logger.info("Starting email monitor for %s", EMAIL_ADDRESS)
+    logger.info("Starting email monitor for %s via %s", EMAIL_ADDRESS, EMAIL_IMAP_SERVER)
+    seen_uids = set()
 
     while True:
         try:
             mail = connect_imap()
-            # Mark all existing as seen on first run
             mail.select("INBOX")
-            _, data = mail.search(None, "ALL")
-            for eid in data[0].split():
-                seen_ids.add(eid)
 
-            logger.info("Email monitor connected. Watching for new Chime payments...")
+            # Mark all existing emails as seen on first connection
+            _, data = mail.search(None, "ALL")
+            if data[0]:
+                for uid in data[0].split():
+                    seen_uids.add(uid)
+            logger.info("Email monitor connected. %d existing emails marked. Watching for new Chime emails...", len(seen_uids))
 
             while True:
                 try:
-                    new_payments = check_new_emails(mail, seen_ids)
-                    for payment in new_payments:
-                        await send_payment_notification(app, payment)
+                    mail.noop()  # Keep connection alive
+                    mail.select("INBOX")
+                    _, data = mail.search(None, "UNSEEN")
+
+                    if data[0]:
+                        for email_id in data[0].split():
+                            if email_id in seen_uids:
+                                continue
+                            seen_uids.add(email_id)
+
+                            _, msg_data = mail.fetch(email_id, "(RFC822)")
+                            for response_part in msg_data:
+                                if isinstance(response_part, tuple):
+                                    msg = email.message_from_bytes(response_part[1])
+                                    process_email(msg, send_telegram_fn)
+
                 except imaplib.IMAP4.abort:
                     logger.warning("IMAP connection lost, reconnecting...")
                     break
                 except Exception as e:
                     logger.error("Error checking emails: %s", e)
 
-                await asyncio.sleep(EMAIL_POLL_INTERVAL)
+                time.sleep(EMAIL_POLL_INTERVAL)
 
         except Exception as e:
             logger.error("Failed to connect to email: %s", e)
-            await asyncio.sleep(60)  # Wait before retrying
+            time.sleep(60)
+
+
+def start_email_monitor(send_telegram_fn):
+    """Start email monitoring in a background thread."""
+    if not EMAIL_ADDRESS or not EMAIL_PASSWORD:
+        logger.info("Email monitoring disabled - no credentials configured.")
+        return None
+
+    thread = threading.Thread(
+        target=email_monitor_loop,
+        args=(send_telegram_fn,),
+        daemon=True,
+        name="email-monitor",
+    )
+    thread.start()
+    logger.info("Email monitor thread started.")
+    return thread

@@ -22,7 +22,6 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 init_db()
 
-
 def send_telegram_message_sync(text: str):
     """Send a formatted message to the Telegram group."""
     import telegram
@@ -36,6 +35,11 @@ def send_telegram_message_sync(text: str):
         )
 
     asyncio.run(_send())
+
+
+# Start email monitoring in background
+from email_monitor import start_email_monitor
+start_email_monitor(send_telegram_fn=send_telegram_message_sync)
 
 
 @app.route("/", methods=["GET"])
