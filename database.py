@@ -65,6 +65,15 @@ def init_db():
                 balance REAL NOT NULL DEFAULT 0.0
             )
         """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS tracking (
+                tag TEXT PRIMARY KEY,
+                is_active BOOLEAN NOT NULL DEFAULT FALSE,
+                started_at TEXT,
+                total_out REAL NOT NULL DEFAULT 0.0,
+                transactions INTEGER NOT NULL DEFAULT 0
+            )
+        """)
     else:
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS payments (
@@ -84,6 +93,15 @@ def init_db():
                 tag TEXT PRIMARY KEY,
                 total REAL NOT NULL DEFAULT 0.0,
                 balance REAL NOT NULL DEFAULT 0.0
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS tracking (
+                tag TEXT PRIMARY KEY,
+                is_active BOOLEAN NOT NULL DEFAULT 0,
+                started_at TEXT,
+                total_out REAL NOT NULL DEFAULT 0.0,
+                transactions INTEGER NOT NULL DEFAULT 0
             )
         """)
     conn.commit()
@@ -169,6 +187,97 @@ def set_balance(tag: str, balance: float):
 def set_total(tag: str, total: float):
     account = get_account(tag)
     set_account(tag, total, account["balance"])
+
+
+def start_tracking(tag: str):
+    """Start tracking fund outflows for an account."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    now = datetime.now().isoformat()
+    if _use_postgres():
+        cursor.execute(
+            "INSERT INTO tracking (tag, is_active, started_at, total_out, transactions) "
+            "VALUES (%s, TRUE, %s, 0.0, 0) "
+            "ON CONFLICT(tag) DO UPDATE SET is_active = TRUE, started_at = %s, total_out = 0.0, transactions = 0",
+            (tag, now, now),
+        )
+    else:
+        cursor.execute(
+            "INSERT INTO tracking (tag, is_active, started_at, total_out, transactions) "
+            "VALUES (?, 1, ?, 0.0, 0) "
+            "ON CONFLICT(tag) DO UPDATE SET is_active = 1, started_at = ?, total_out = 0.0, transactions = 0",
+            (tag, now, now),
+        )
+    conn.commit()
+    conn.close()
+
+
+def stop_tracking(tag: str) -> dict:
+    """Stop tracking and return summary."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    if _use_postgres():
+        cursor.execute("SELECT * FROM tracking WHERE tag = %s", (tag,))
+    else:
+        cursor.execute("SELECT * FROM tracking WHERE tag = ?", (tag,))
+    row = _fetchone_dict(cursor)
+
+    if not row or not row.get("is_active"):
+        conn.close()
+        return {"active": False}
+
+    result = {
+        "active": True,
+        "tag": tag,
+        "started_at": row["started_at"],
+        "total_out": row["total_out"],
+        "transactions": row["transactions"],
+    }
+
+    if _use_postgres():
+        cursor.execute(
+            "UPDATE tracking SET is_active = FALSE WHERE tag = %s", (tag,)
+        )
+    else:
+        cursor.execute(
+            "UPDATE tracking SET is_active = 0 WHERE tag = ?", (tag,)
+        )
+    conn.commit()
+    conn.close()
+    return result
+
+
+def add_tracking_out(tag: str, amount: float):
+    """Add a spending amount to the tracking total if tracking is active."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    if _use_postgres():
+        cursor.execute(
+            "UPDATE tracking SET total_out = total_out + %s, transactions = transactions + 1 "
+            "WHERE tag = %s AND is_active = TRUE",
+            (amount, tag),
+        )
+    else:
+        cursor.execute(
+            "UPDATE tracking SET total_out = total_out + ?, transactions = transactions + 1 "
+            "WHERE tag = ? AND is_active = 1",
+            (amount, tag),
+        )
+    conn.commit()
+    conn.close()
+
+
+def is_tracking_active(tag: str) -> bool:
+    """Check if tracking is active for an account."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    if _use_postgres():
+        cursor.execute("SELECT is_active FROM tracking WHERE tag = %s", (tag,))
+    else:
+        cursor.execute("SELECT is_active FROM tracking WHERE tag = ?", (tag,))
+    row = _fetchone_dict(cursor)
+    conn.close()
+    return bool(row and row.get("is_active"))
 
 
 def get_recent_payments(tag: str, limit: int = 10) -> list:

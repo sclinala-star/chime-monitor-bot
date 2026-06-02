@@ -10,7 +10,7 @@ import time
 from urllib.parse import unquote
 
 from flask import Flask, request, jsonify
-from database import add_payment, set_balance, init_db
+from database import add_payment, set_balance, init_db, add_tracking_out
 from bot import format_payment_message, format_spending_message, parse_chime_sms
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DEFAULT_TAG
 
@@ -112,6 +112,7 @@ def notify_get():
             return jsonify({"status": "duplicate_ignored", "type": "spending"})
         # Spending notification - update balance and send formatted message
         set_balance(tag, parsed["new_balance"])
+        add_tracking_out(tag, parsed["amount"])
         parsed["tag"] = tag
         msg = format_spending_message(parsed)
         try:

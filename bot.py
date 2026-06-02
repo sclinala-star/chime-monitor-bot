@@ -8,7 +8,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-from database import init_db, add_payment, get_account, set_balance, set_total, get_recent_payments
+from database import init_db, add_payment, get_account, set_balance, set_total, get_recent_payments, start_tracking, stop_tracking, add_tracking_out
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DEFAULT_TAG
 
 logging.basicConfig(
@@ -58,12 +58,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<b>Commands:</b>\n"
         "/balance Georgiana Keel - View balance\n"
         "/setbalance 43 Georgiana Keel - Set balance\n"
-        "/add 7.00 Adam K. - Add payment\n"
         "/settotal 0 Georgiana Keel - Reset total\n"
         "/history Georgiana Keel - Recent payments\n\n"
-        "<b>Or just type:</b>\n"
+        "<b>Just type:</b>\n"
         "<code>update 43 Georgiana</code> - Update balance\n"
-        "<code>update 128 Imelda</code> - Update balance",
+        "<code>st Georgiana</code> - Start fund out tracking\n"
+        "<code>stop Georgiana</code> - Stop &#38; show total out",
         parse_mode="HTML",
     )
 
@@ -301,6 +301,10 @@ UPDATE_BALANCE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Pattern for start/stop tracking: "st Georgiana" or "stop Imelda"
+ST_PATTERN = re.compile(r"^st\s+(.+)", re.IGNORECASE)
+STOP_PATTERN = re.compile(r"^stop\s+(.+)", re.IGNORECASE)
+
 # Known tags for matching
 KNOWN_TAGS = ["Georgiana Keel", "Imelda Villanueva"]
 
@@ -318,6 +322,41 @@ async def sms_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle forwarded SMS, plain text Chime notifications, and natural language balance updates."""
     text = update.message.text or ""
     if not text:
+        return
+
+    # Check for "st <name>" - start tracking
+    st_match = ST_PATTERN.match(text.strip())
+    if st_match:
+        tag = _detect_tag_from_text(st_match.group(1))
+        start_tracking(tag)
+        await update.message.reply_text(
+            f"▶️ <b>Tracking Started</b>\n\n"
+            f"👤 Account: {tag}\n"
+            f"📊 Fund out tracking চালু হয়েছে।\n\n"
+            f"Stop করতে লিখুন: <code>stop {tag.split()[0]}</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    # Check for "stop <name>" - stop tracking
+    stop_match = STOP_PATTERN.match(text.strip())
+    if stop_match:
+        tag = _detect_tag_from_text(stop_match.group(1))
+        result = stop_tracking(tag)
+        if not result.get("active"):
+            await update.message.reply_text(
+                f"⚠️ {tag} এর tracking চালু ছিল না।",
+                parse_mode="HTML",
+            )
+            return
+        await update.message.reply_text(
+            f"⏹️ <b>Tracking Stopped</b>\n\n"
+            f"👤 Account: {tag}\n"
+            f"💸 Total Fund Out: ${result['total_out']:,.2f}\n"
+            f"🔢 Transactions: {result['transactions']}\n"
+            f"🕐 Started: {result['started_at'][:16]}",
+            parse_mode="HTML",
+        )
         return
 
     # Check for natural language balance update
