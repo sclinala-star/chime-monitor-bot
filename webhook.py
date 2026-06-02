@@ -65,14 +65,19 @@ def send_telegram_message_sync(text: str):
 import threading
 
 def _start_bot_polling():
-    """Run the Telegram bot polling in a background thread."""
+    """Run the Telegram bot polling in a background thread with its own event loop."""
+    import asyncio
     try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         from bot import create_app
         bot_app = create_app()
         logger.info("Starting Telegram bot polling in background...")
         bot_app.run_polling(drop_pending_updates=True)
     except Exception as e:
         logger.error("Bot polling failed: %s", e)
+        import traceback
+        traceback.print_exc()
 
 _bot_thread = threading.Thread(target=_start_bot_polling, daemon=True)
 _bot_thread.start()
