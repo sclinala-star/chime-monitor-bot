@@ -55,13 +55,15 @@ async def send_payment_notification(app: Application, payment: dict, chat_id: st
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🏦 <b>Chime Monitor Bot</b>\n\n"
-        "Commands:\n"
-        "/add &lt;amount&gt; &lt;sender&gt; [tag] - Add a payment\n"
-        "/balance - View current balance\n"
-        "/setbalance &lt;amount&gt; [tag] - Set account balance\n"
-        "/settotal &lt;amount&gt; [tag] - Set running total\n"
-        "/history [tag] - View recent payments\n"
-        "/help - Show this help message",
+        "<b>Commands:</b>\n"
+        "/balance Georgiana Keel - View balance\n"
+        "/setbalance 43 Georgiana Keel - Set balance\n"
+        "/add 7.00 Adam K. - Add payment\n"
+        "/settotal 0 Georgiana Keel - Reset total\n"
+        "/history Georgiana Keel - Recent payments\n\n"
+        "<b>Or just type:</b>\n"
+        "<code>update 43 Georgiana</code> - Update balance\n"
+        "<code>update 128 Imelda</code> - Update balance",
         parse_mode="HTML",
     )
 
@@ -120,7 +122,8 @@ async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    tag = context.args[0] if context.args else DEFAULT_TAG
+    """Show balance: /balance [tag name]"""
+    tag = " ".join(context.args) if context.args else DEFAULT_TAG
     account = get_account(tag)
     await update.message.reply_text(
         f"🏦 <b>Account Info - {tag}</b>\n\n"
@@ -131,17 +134,32 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def set_balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set balance: /setbalance <amount> [tag name]
+    Examples: /setbalance 43 Georgiana Keel
+              /setbalance 128
+    """
     if not context.args:
-        await update.message.reply_text("Usage: /setbalance <amount> [tag]")
+        await update.message.reply_text(
+            "Usage: /setbalance <amount> [tag name]\n"
+            "Example: /setbalance 43 Georgiana Keel"
+        )
         return
     try:
         amount = float(context.args[0].replace("$", "").replace(",", ""))
     except ValueError:
         await update.message.reply_text("Invalid amount.")
         return
-    tag = context.args[1] if len(context.args) > 1 else DEFAULT_TAG
+    # Join remaining args as tag name (supports multi-word names)
+    tag = " ".join(context.args[1:]) if len(context.args) > 1 else DEFAULT_TAG
     set_balance(tag, amount)
-    await update.message.reply_text(f"Balance for {tag} set to ${amount:,.2f}")
+    account = get_account(tag)
+    await update.message.reply_text(
+        f"✅ <b>Balance Updated</b>\n\n"
+        f"👤 Account: {tag}\n"
+        f"💳 New Balance: ${amount:,.2f}\n"
+        f"💰 Total: ${account['total']:,.2f}",
+        parse_mode="HTML",
+    )
 
 
 async def set_total_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -277,12 +295,52 @@ def parse_chime_sms(text: str) -> dict | None:
     return {"type": "received", "amount": amount, "sender": sender}
 
 
+# Pattern for natural language balance update: "update 43 Georgiana" or "update balance 128 Georgiana Keel"
+UPDATE_BALANCE_PATTERN = re.compile(
+    r"(?:update|set|change)\s*(?:balance|bal)?\s*\$?\s*([\d,]+\.?\d*)\s*(.*)",
+    re.IGNORECASE,
+)
+
+# Known tags for matching
+KNOWN_TAGS = ["Georgiana Keel", "Imelda Villanueva"]
+
+
+def _detect_tag_from_text(text: str) -> str:
+    """Detect account tag from text by matching first names."""
+    for tag in KNOWN_TAGS:
+        first_name = tag.split()[0]
+        if first_name.lower() in text.lower():
+            return tag
+    return DEFAULT_TAG
+
+
 async def sms_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle forwarded SMS or plain text messages containing Chime payment info."""
+    """Handle forwarded SMS, plain text Chime notifications, and natural language balance updates."""
     text = update.message.text or ""
     if not text:
         return
 
+    # Check for natural language balance update
+    update_match = UPDATE_BALANCE_PATTERN.match(text.strip())
+    if update_match:
+        try:
+            amount = float(update_match.group(1).replace(",", ""))
+        except ValueError:
+            return
+        tag_text = update_match.group(2).strip()
+        tag = _detect_tag_from_text(tag_text) if tag_text else DEFAULT_TAG
+        set_balance(tag, amount)
+        account = get_account(tag)
+        await update.message.reply_text(
+            f"✅ <b>Balance Updated</b>\n\n"
+            f"👤 Account: {tag}\n"
+            f"💳 New Balance: ${amount:,.2f}\n"
+            f"💰 Total: ${account['total']:,.2f}",
+            parse_mode="HTML",
+        )
+        return
+
+    # Try Chime notification parsing
     parsed = parse_chime_sms(text)
     if not parsed:
         return

@@ -61,6 +61,22 @@ def send_telegram_message_sync(text: str):
 # from email_monitor import start_email_monitor
 # start_email_monitor(send_telegram_fn=send_telegram_message_sync)
 
+# Start Telegram bot polling in background thread for command handling
+import threading
+
+def _start_bot_polling():
+    """Run the Telegram bot polling in a background thread."""
+    try:
+        from bot import create_app
+        bot_app = create_app()
+        logger.info("Starting Telegram bot polling in background...")
+        bot_app.run_polling(drop_pending_updates=True)
+    except Exception as e:
+        logger.error("Bot polling failed: %s", e)
+
+_bot_thread = threading.Thread(target=_start_bot_polling, daemon=True)
+_bot_thread.start()
+
 
 @app.route("/", methods=["GET"])
 def health():
