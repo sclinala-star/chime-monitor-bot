@@ -19,18 +19,35 @@ _dedup_cache = {}
 DEDUP_WINDOW_SECONDS = 120  # Ignore duplicate within 2 minutes
 
 
+import re as _re
+
+def _normalize_id(s: str) -> str:
+    """Normalize sender/merchant for dedup: lowercase, strip punctuation & spaces."""
+    return _re.sub(r"[^a-z0-9]", "", s.lower())
+
+
 def _is_duplicate(tag: str, amount: float, identifier: str) -> bool:
-    """Check if same payment/spending was processed recently."""
-    key = (tag, amount, identifier.lower().strip())
+    """Check if same payment/spending was processed recently.
+    
+    Uses (tag, amount) as primary key - same amount to same account
+    within 2 minutes is almost certainly a duplicate.
+    """
+    norm_id = _normalize_id(identifier)
+    key = (tag, amount, norm_id)
+    # Also check amount-only key (catches name formatting differences)
+    key_amount_only = (tag, amount)
     now = time.time()
     # Clean old entries
     expired = [k for k, t in _dedup_cache.items() if now - t > DEDUP_WINDOW_SECONDS]
     for k in expired:
         del _dedup_cache[k]
-    # Check if duplicate
+    # Check if duplicate by amount-only (same tag + same amount within window)
+    if key_amount_only in _dedup_cache:
+        return True
     if key in _dedup_cache:
         return True
     _dedup_cache[key] = now
+    _dedup_cache[key_amount_only] = now
     return False
 
 logging.basicConfig(
