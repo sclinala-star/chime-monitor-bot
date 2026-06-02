@@ -14,40 +14,41 @@ from database import add_payment, set_balance, init_db, add_tracking_out
 from bot import format_payment_message, format_spending_message, parse_chime_sms
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DEFAULT_TAG
 
-# Deduplication cache: key = (tag, amount, sender/merchant) -> timestamp
+# Deduplication cache: key = (tag, amount, normalized_sender) -> timestamp
+# Only catches true duplicates: same account + same amount + same sender within 30 sec
+# After 30 sec, same person paying same amount again counts as a new payment
 _dedup_cache = {}
-DEDUP_WINDOW_SECONDS = 120  # Ignore duplicate within 2 minutes
+DEDUP_WINDOW_SECONDS = 30
 
 
 import re as _re
 
 def _normalize_id(s: str) -> str:
-    """Normalize sender/merchant for dedup: lowercase, strip punctuation & spaces."""
+    """Normalize sender/merchant: lowercase, remove punctuation & spaces.
+    
+    'Mavrick B.' and 'Mavrick B' both become 'mavrickb'
+    """
     return _re.sub(r"[^a-z0-9]", "", s.lower())
 
 
 def _is_duplicate(tag: str, amount: float, identifier: str) -> bool:
     """Check if same payment/spending was processed recently.
     
-    Uses (tag, amount) as primary key - same amount to same account
-    within 2 minutes is almost certainly a duplicate.
+    Matches on (tag, amount, normalized_sender) within 30 seconds.
+    Same person paying same amount after 30 sec = new payment (not duplicate).
+    Different person paying same amount = not duplicate.
     """
     norm_id = _normalize_id(identifier)
     key = (tag, amount, norm_id)
-    # Also check amount-only key (catches name formatting differences)
-    key_amount_only = (tag, amount)
     now = time.time()
     # Clean old entries
     expired = [k for k, t in _dedup_cache.items() if now - t > DEDUP_WINDOW_SECONDS]
     for k in expired:
         del _dedup_cache[k]
-    # Check if duplicate by amount-only (same tag + same amount within window)
-    if key_amount_only in _dedup_cache:
-        return True
+    # Check if duplicate
     if key in _dedup_cache:
         return True
     _dedup_cache[key] = now
-    _dedup_cache[key_amount_only] = now
     return False
 
 logging.basicConfig(
