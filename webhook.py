@@ -57,9 +57,9 @@ def send_telegram_message_sync(text: str):
     asyncio.run(_send())
 
 
-# Start email monitoring in background
-from email_monitor import start_email_monitor
-start_email_monitor(send_telegram_fn=send_telegram_message_sync)
+# Email monitoring disabled - using MacroDroid only
+# from email_monitor import start_email_monitor
+# start_email_monitor(send_telegram_fn=send_telegram_message_sync)
 
 
 @app.route("/", methods=["GET"])
