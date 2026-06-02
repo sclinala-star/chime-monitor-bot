@@ -6,12 +6,32 @@ parses them, and sends formatted payment messages to Telegram.
 import asyncio
 import logging
 import os
+import time
 from urllib.parse import unquote
 
 from flask import Flask, request, jsonify
 from database import add_payment, set_balance, init_db
 from bot import format_payment_message, format_spending_message, parse_chime_sms
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DEFAULT_TAG
+
+# Deduplication cache: key = (tag, amount, sender/merchant) -> timestamp
+_dedup_cache = {}
+DEDUP_WINDOW_SECONDS = 120  # Ignore duplicate within 2 minutes
+
+
+def _is_duplicate(tag: str, amount: float, identifier: str) -> bool:
+    """Check if same payment/spending was processed recently."""
+    key = (tag, amount, identifier.lower().strip())
+    now = time.time()
+    # Clean old entries
+    expired = [k for k, t in _dedup_cache.items() if now - t > DEDUP_WINDOW_SECONDS]
+    for k in expired:
+        del _dedup_cache[k]
+    # Check if duplicate
+    if key in _dedup_cache:
+        return True
+    _dedup_cache[key] = now
+    return False
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -70,6 +90,10 @@ def notify_get():
         return jsonify({"status": "forwarded_raw", "text": text})
 
     if parsed.get("type") == "spending":
+        # Dedup check for spending
+        if _is_duplicate(tag, parsed["amount"], parsed.get("merchant", "")):
+            logger.info("Duplicate spending ignored [%s]: $%.2f at %s", tag, parsed["amount"], parsed.get("merchant", ""))
+            return jsonify({"status": "duplicate_ignored", "type": "spending"})
         # Spending notification - update balance and send formatted message
         set_balance(tag, parsed["new_balance"])
         parsed["tag"] = tag
@@ -81,6 +105,11 @@ def notify_get():
             logger.error("Failed to send spending notification: %s", e)
             return jsonify({"error": str(e)}), 500
         return jsonify({"status": "ok", "type": "spending", "amount": parsed["amount"], "merchant": parsed["merchant"]})
+
+    # Dedup check for payment
+    if _is_duplicate(tag, parsed["amount"], parsed["sender"]):
+        logger.info("Duplicate payment ignored [%s]: $%.2f from %s", tag, parsed["amount"], parsed["sender"])
+        return jsonify({"status": "duplicate_ignored", "type": "received"})
 
     # Payment received
     payment = add_payment(tag, parsed["amount"], parsed["sender"])

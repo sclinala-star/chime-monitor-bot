@@ -128,7 +128,13 @@ def process_email(msg, send_telegram_fn):
                 logger.error("Failed to send raw email notification: %s", e)
         return False
 
+    # Use dedup from webhook module to prevent double-counting
+    from webhook import _is_duplicate
+
     if parsed.get("type") == "spending":
+        if _is_duplicate(tag, parsed["amount"], parsed.get("merchant", "")):
+            logger.info("Email duplicate spending ignored [%s]: $%.2f", tag, parsed["amount"])
+            return True
         set_balance(tag, parsed["new_balance"])
         parsed["tag"] = tag
         msg_text = format_spending_message(parsed)
@@ -140,6 +146,9 @@ def process_email(msg, send_telegram_fn):
         return True
 
     # Payment received
+    if _is_duplicate(tag, parsed["amount"], parsed["sender"]):
+        logger.info("Email duplicate payment ignored [%s]: $%.2f from %s", tag, parsed["amount"], parsed["sender"])
+        return True
     payment = add_payment(tag, parsed["amount"], parsed["sender"])
     msg_text = format_payment_message(payment)
     try:
