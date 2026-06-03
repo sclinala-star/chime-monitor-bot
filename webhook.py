@@ -15,10 +15,10 @@ from bot import format_payment_message, format_spending_message, parse_chime_sms
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DEFAULT_TAG
 
 # Deduplication cache: key = (tag, amount, normalized_sender) -> timestamp
-# Only catches true duplicates: same account + same amount + same sender within 30 sec
-# After 30 sec, same person paying same amount again counts as a new payment
+# Catches duplicates from MacroDroid double-firing (can be up to 1-2 min apart)
+# After 3 min, same person paying same amount again counts as a new payment
 _dedup_cache = {}
-DEDUP_WINDOW_SECONDS = 30
+DEDUP_WINDOW_SECONDS = 180
 
 
 import re as _re
@@ -34,8 +34,8 @@ def _normalize_id(s: str) -> str:
 def _is_duplicate(tag: str, amount: float, identifier: str) -> bool:
     """Check if same payment/spending was processed recently.
     
-    Matches on (tag, amount, normalized_sender) within 30 seconds.
-    Same person paying same amount after 30 sec = new payment (not duplicate).
+    Matches on (tag, amount, normalized_sender) within 3 minutes.
+    Same person paying same amount after 3 min = new payment (not duplicate).
     Different person paying same amount = not duplicate.
     """
     norm_id = _normalize_id(identifier)
